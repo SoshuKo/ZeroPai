@@ -1490,7 +1490,28 @@ async function saveFile(name, text){
       if (e && e.code === 'rate_limited') { toast('保存ダイアログが開いています。少し待ってからもう一度押してください'); return; }
     }
   }
-  showTextModal(name, text);
+  /*
+    通常ブラウザでは Blob + download 属性で直接ファイル保存する。
+    埋め込み環境の downloads API が使えない場合でも、エクスポートを
+    テキスト表示だけで終わらせず .json / .csv として保存できるようにする。
+  */
+  try {
+    const mime = name.toLowerCase().endsWith('.csv') ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('ファイルを保存しました');
+    return;
+  } catch (e) {
+    showTextModal(name, text);
+  }
 }
 function showTextModal(name, text){
   openOverlay(`<h3>${esc(name)}</h3>
