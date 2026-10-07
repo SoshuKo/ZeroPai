@@ -1201,18 +1201,31 @@ function ukeire(c, mN, vis, sh){
 function keepValue(c, t, ctx){
   const st = ctx.style; let v = 0;
   if (t === Z) {
-    let nine = 0; for (let b = 0; b < 27; b += 9) nine += Math.min(c[b], c[b + 8]);
-    v = 1.5 + (c[Z] - 1) * 2 + nine * 1.2;
-    if (st === 'zero') v += 6;
+    let anchors = 0, bridges = 0;
+    for (let b = 0; b < 27; b += 9) {
+      if (c[b] || c[b + 8]) anchors++;
+      if (c[b] && c[b + 8]) bridges++;
+    }
+    /*
+      零寄りでも孤立0は抱え込みすぎない。
+      00/000、または同色19が揃った「具体的な零ルート」がある時だけ評価を大きく上げる。
+    */
+    v = 0.7 + Math.max(0, c[Z] - 1) * 2.4 + anchors * 0.45 + bridges * 1.2;
+    if (st === 'zero') v += 0.4 + (c[Z] >= 2 ? 1.8 : 0) + bridges * 0.9;
   } else if (t >= 27) {
     const yh = t >= 31 || t === ctx.seatW || t === ctx.roundW;
     v = yh ? (c[t] >= 2 ? 5 : 1.4) : (c[t] >= 2 ? 3 : 0.3);
-    if (st === 'zero' && c[Z]) v += 1.2;
+    /* 零刻が見える前から全ての字牌を抱え込むのは抑える */
+    if (st === 'zero' && c[Z] >= 2) v += c[t] >= 2 ? 1.1 : 0.35;
   } else {
     const n = t % 9; v = (c[t] - 1) * 1.8;
     for (const dd of [-2, -1, 1, 2]) { const m = n + dd; if (m < 0 || m > 8) continue; v += c[t + dd] * (Math.abs(dd) === 1 ? 1.2 : 0.7); }
     v += (n >= 2 && n <= 6) ? 0.6 : (n === 1 || n === 7 ? 0.3 : 0);
-    if (n === 0 || n === 8) { const o = n === 0 ? t + 8 : t - 8; v += (c[Z] ? 1.0 : 0) + (c[o] && c[Z] ? 1.5 : 0); if (st === 'zero') v += 1.2 + c[Z] * 0.8; }
+    if (n === 0 || n === 8) {
+      const o = n === 0 ? t + 8 : t - 8;
+      v += (c[Z] ? 0.8 : 0) + (c[o] && c[Z] ? 1.4 : 0);
+      if (st === 'zero' && c[Z]) v += 0.35 + (c[o] ? 0.8 : 0) + (c[Z] >= 2 ? 0.35 : 0);
+    }
   }
   for (const d of ctx.dora) if (d === t) v += 1.5;
   return v;
@@ -1244,7 +1257,8 @@ function chooseDiscard(G, s, allowed, style){
   const minSh = Math.min(...shs);
   const ctx = aiCtx(G, s, style);
   const threat = [0,1,2,3].some(q => q !== s && K.riichi[q]);
-  const foldAt = style === 'def' ? 1 : style === 'speed' ? 3 : 2;
+  /* 零寄りは副露後の安手で押し返しすぎない。門前時は標準と同じ。 */
+  const foldAt = style === 'def' ? 1 : style === 'speed' ? 3 : (style === 'zero' && K.melds[s].some(m => m.open) ? 1 : 2);
   let bestI = 0, bestScore = -Infinity;
   const fold = threat && minSh >= foldAt;
   const vis = (minSh <= 2 && !fold) ? visibleCounts(G, s) : null;
@@ -1313,6 +1327,7 @@ const AI = {
     const cur = shanten(c, mN);
     if (threat && cur >= 1 && style !== 'speed') return { a: 'pass' };
     const melds = meldSets(K, s);
+    const hadRoute = yakuRoute(G, s, c, melds);
     let best = null;
     const tryCall = (kind, useTypes, dec) => {
       const c2 = c.slice(); for (const u of useTypes) c2[u]--;
@@ -1323,13 +1338,24 @@ const AI = {
       const ns = shanten(c2, mN + 1);
       const ms = melds.concat([m]);
       if (!yakuRoute(G, s, c2, ms)) return;
-      const zeroish = (m.k === 't' && t === Z) || m.k === 'z';
+      const zeroTrip = m.k === 't' && t === Z;
+      const zeroGate = m.k === 'z';
+      const zeroish = zeroTrip || zeroGate;
+      const breaksZeroPair = zeroGate && c[Z] >= 2;
       let need = ns < cur;
       if (kind === 'minkan') need = ns <= cur && melds.some(x => x.open);
-      if (style === 'zero' && zeroish) need = ns <= cur;
+      /*
+        零寄りの「シャンテン維持でも零なら鳴く」を制限する。
+        000 は打点があるので例外。901 は、1向聴以下で初めて役を確保できる時だけ
+        同シャンテン鳴きを許す。00を崩してまで同シャンテンの901には行かない。
+      */
+      if (style === 'zero' && zeroish && ns === cur) {
+        const gainsRoute = !hadRoute && yakuRoute(G, s, c2, ms);
+        need = zeroTrip || (zeroGate && cur <= 1 && gainsRoute && !breaksZeroPair);
+      }
       if (style === 'std' || style === 'def') { if (cur >= 4 && !(m.k === 't' && (t >= 27))) need = false; }
       if (!need) return;
-      const score = -ns * 10 + (zeroish ? 3 : 0) + (kind === 'pon' ? 1 : 0);
+      const score = -ns * 10 + (zeroTrip ? 4 : zeroGate ? 1.5 : 0) + (kind === 'pon' ? 1 : 0) - (breaksZeroPair ? 2 : 0);
       if (!best || score > best.score) best = { score, dec };
     };
     if (o.pon) tryCall('pon', [t, t], { a: 'pon', use: o.pon[0].use });
@@ -1714,7 +1740,7 @@ function startPanelHTML(){
     </div>
   </div>
   <div class="panel" style="margin-top:12px"><h3 style="margin-top:0">CPUのタイプ</h3>
-  <p class="small">標準：牌効率と押し引きのバランス型。零寄り：零牌・1・9を手元に残し、901チーや零牌ポンを積極的に行う。速攻：鳴いて早い和了を目指し、リーチにもあまり降りない。守備：他家のリーチに早めに降りる。</p></div>`;
+  <p class="small">標準：牌効率と押し引きのバランス型。零寄り：00・000や901など具体的な零ルートを優先しつつ、孤立0の抱え込みや無理な同シャンテン鳴きは控える。速攻：鳴いて早い和了を目指し、リーチにもあまり降りない。守備：他家のリーチに早めに降りる。</p></div>`;
 }
 function bindStart(){
   const S = App.settings;
